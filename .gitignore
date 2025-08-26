@@ -1,0 +1,77 @@
+# Python bytecode / cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments / Python tools
+.venv/
+venv/
+env/
+ENV/
+.python-version
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+*.jpg
+*.png
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.ico
+
+./bree
+./data-scaled
+./data
+./data-scaled
+./data-scaled
+./old-data
+*.txt
+*.cache
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS/Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.code-workspace
+
+# Logs
+logs/
+*.log
+
+# Ultralytics / training outputs
+runs/
+wandb/
+
+# Datasets and generated data
+data/
+new-data/
+datasets/
+outputs/
+checkpoints/
+
+# Model weights and large binaries
+*.pt
+*.onnx
+*.engine
+*.trt
+*.npy
+*.npz
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*.swo
+
+

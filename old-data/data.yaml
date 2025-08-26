@@ -1,0 +1,16 @@
+train: ./train/images
+val: ./valid/images
+test: ./test/images
+
+kpt_shape: [3, 3]
+flip_idx: [2, 1, 0]
+
+nc: 1
+names: ['Salamander']
+
+roboflow:
+  workspace: void-olbcr
+  project: direction-model-ymlah
+  version: 3
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/void-olbcr/direction-model-ymlah/dataset/3  
