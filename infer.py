@@ -1,5 +1,6 @@
 import argparse
 import math
+import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -76,6 +77,7 @@ def draw_prediction(
 def compute_angle_deg_from_kps(
     kps_xy: np.ndarray,
     image_center_xy: Optional[Tuple[float, float]],
+    quiet: bool = False,
 ) -> float:
     if kps_xy.shape[0] < 3:
         return 0.0
@@ -89,11 +91,13 @@ def compute_angle_deg_from_kps(
     cos_theta = np.dot(MC, MN) / (np.linalg.norm(MC) * np.linalg.norm(MN))
     theta = np.arccos(cos_theta)
     target_angle = np.degrees(theta)
-    print(f"Target angle: {target_angle:.1f}°")
+    if not quiet:
+        print(f"Target angle: {target_angle:.1f}°")
 
     CM = center - midpoint
     current_angle = 180 - np.degrees(np.arctan2(CM[1], CM[0]))
-    print(f"Current angle: {current_angle:.1f}°")
+    if not quiet:
+        print(f"Current angle: {current_angle:.1f}°")
     return target_angle - current_angle + 180
 
 def rotate_and_crop(
@@ -145,7 +149,10 @@ def run_inference(
     keypoint_names: Optional[List[str]] = None,
     visual_mode: bool = True,
     output_path: Optional[Path] = None,
-) -> None:
+    quiet: bool = False,
+) -> float:
+    start_time = time.time()
+
     # Load original high-res image for plotting and cropping
     orig_img = mpimg.imread(str(image_path))
     if orig_img is None:
@@ -205,7 +212,7 @@ def run_inference(
         bw = (x2 - x1)
         bh = (y2 - y1)
         # Use original image center as reference (optional)
-        angle = compute_angle_deg_from_kps(keypoints_xy[0], image_center_xy=(cx, cy))
+        angle = compute_angle_deg_from_kps(keypoints_xy[0], image_center_xy=(cx, cy), quiet=quiet)
         crop, M, x_off, y_off = rotate_and_crop(orig_img, (cx, cy), bw, bh, angle)
 
         # Get the downscaled version from model inference
@@ -302,7 +309,11 @@ def run_inference(
                 # Convert numpy array to PIL Image and save
                 crop_pil = Image.fromarray(crop)
                 crop_pil.save(str(output_file))
-                print(f"Saved processed image to: {output_file}")
+                if not quiet:
+                    print(f"Saved processed image to: {output_file}")
+
+        # Close the figure to free memory
+        plt.close(fig)
     else:
         if visual_mode:
             # No detections, show original and downscaled
@@ -318,8 +329,15 @@ def run_inference(
             ax2.axis("off")
             plt.tight_layout()
             plt.show()
+            # Close the figure to free memory
+            plt.close(fig)
         else:
-            print(f"No detections found for {image_path.name}, skipping save")
+            if not quiet:
+                print(f"No detections found for {image_path.name}, skipping save")
+
+    end_time = time.time()
+    processing_time = end_time - start_time
+    return processing_time
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -391,11 +409,18 @@ def main() -> None:
 
     print(f"Processing {len(image_paths)} image(s)...")
 
+    total_start_time = time.time()
+    quiet_mode = not args.visual
+
     # Process each image
     for i, image_path in enumerate(image_paths):
-        print(f"\n[{i+1}/{len(image_paths)}] Processing: {image_path.name}")
+        if quiet_mode:
+            print(f"[{i+1}/{len(image_paths)}] Processing: {image_path.name}", end=" ", flush=True)
+        else:
+            print(f"\n[{i+1}/{len(image_paths)}] Processing: {image_path.name}")
+
         try:
-            run_inference(
+            processing_time = run_inference(
                 image_path=image_path,
                 model_path=model_path,
                 imgsz=args.imgsz,
@@ -403,12 +428,25 @@ def main() -> None:
                 keypoint_names=kp_names,
                 visual_mode=args.visual,
                 output_path=output_path,
+                quiet=quiet_mode,
             )
+
+            if quiet_mode:
+                print(f"({processing_time:.1f}s)")
         except Exception as e:
-            print(f"Error processing {image_path}: {e}")
+            if quiet_mode:
+                print(f"ERROR ({e})")
+            else:
+                print(f"Error processing {image_path}: {e}")
             continue
 
-    print(f"\nFinished processing {len(image_paths)} image(s)")
+    total_end_time = time.time()
+    total_time = total_end_time - total_start_time
+
+    if quiet_mode:
+        print(f"Total time: {total_time:.1f}s")
+    else:
+        print(f"\nFinished processing {len(image_paths)} image(s)")
 
 
 if __name__ == "__main__":
