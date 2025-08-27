@@ -8,6 +8,7 @@ import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 import numpy as np
 from ultralytics import YOLO
+from PIL import Image
 
 
 def parse_kp_names(arg: Optional[str]) -> Optional[List[str]]:
@@ -142,6 +143,8 @@ def run_inference(
     imgsz: int,
     conf: float,
     keypoint_names: Optional[List[str]] = None,
+    visual_mode: bool = True,
+    output_path: Optional[Path] = None,
 ) -> None:
     # Load original high-res image for plotting and cropping
     orig_img = mpimg.imread(str(image_path))
@@ -288,22 +291,35 @@ def run_inference(
             ax3.scatter([rx_m], [ry_m], c="orange", s=40, zorder=5)
             ax3.plot([rx_m, rx_1], [ry_m, ry_1], color="orange", linewidth=2, zorder=5)
 
-        plt.tight_layout()
-        plt.show()
+        if visual_mode:
+            plt.tight_layout()
+            plt.show()
+        else:
+            # Save the processed crop image
+            if output_path is not None:
+                output_path.mkdir(parents=True, exist_ok=True)
+                output_file = output_path / image_path.name
+                # Convert numpy array to PIL Image and save
+                crop_pil = Image.fromarray(crop)
+                crop_pil.save(str(output_file))
+                print(f"Saved processed image to: {output_file}")
     else:
-        # No detections, show original and downscaled
-        downscaled_img_bgr = result.orig_img
-        downscaled_img = downscaled_img_bgr[:, :, ::-1].copy()  # BGR to RGB
+        if visual_mode:
+            # No detections, show original and downscaled
+            downscaled_img_bgr = result.orig_img
+            downscaled_img = downscaled_img_bgr[:, :, ::-1].copy()  # BGR to RGB
 
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
-        ax1.imshow(orig_img)
-        ax1.set_title(f"Original ({orig_w}x{orig_h}) | No detections")
-        ax1.axis("off")
-        ax2.imshow(downscaled_img)
-        ax2.set_title(f"Model Input ({inf_w}x{inf_h}) | No detections")
-        ax2.axis("off")
-        plt.tight_layout()
-        plt.show()
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
+            ax1.imshow(orig_img)
+            ax1.set_title(f"Original ({orig_w}x{orig_h}) | No detections")
+            ax1.axis("off")
+            ax2.imshow(downscaled_img)
+            ax2.set_title(f"Model Input ({inf_w}x{inf_h}) | No detections")
+            ax2.axis("off")
+            plt.tight_layout()
+            plt.show()
+        else:
+            print(f"No detections found for {image_path.name}, skipping save")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -324,6 +340,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="left-eye,snout,right-eye",
         help="Comma-separated keypoint names in order. Leave empty to show indices.",
     )
+    p.add_argument("--visual", action="store_true", help="Show visualization instead of saving processed images")
+    p.add_argument("--output", type=str, help="Output folder path for processed images (required when not using --visual)")
     return p
 
 
@@ -354,10 +372,17 @@ def main() -> None:
     if args.image and args.folder:
         raise ValueError("Cannot provide both --image and --folder")
 
+    # Validate visual/output arguments
+    if not args.visual and not args.output:
+        raise ValueError("Must specify --output when not using --visual mode")
+    if args.visual and args.output:
+        raise ValueError("Cannot specify --output when using --visual mode")
+
     # Determine input path
     input_path = Path(args.image or args.folder)
     model_path = Path(args.model)
     kp_names = parse_kp_names(args.kp_names)
+    output_path = Path(args.output) if args.output else None
 
     # Get list of images to process
     image_paths = get_image_paths(input_path)
@@ -376,6 +401,8 @@ def main() -> None:
                 imgsz=args.imgsz,
                 conf=args.conf,
                 keypoint_names=kp_names,
+                visual_mode=args.visual,
+                output_path=output_path,
             )
         except Exception as e:
             print(f"Error processing {image_path}: {e}")
