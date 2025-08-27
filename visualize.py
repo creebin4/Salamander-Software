@@ -117,7 +117,7 @@ def visualize_random_sample():
     labels = read_label_file(label_path)
 
     # Define keypoint names
-    keypoint_names = ["left-eye", "snout", "right-eye"]
+    keypoint_names = ["0", "1", "2", "3", "4", "5"]
 
     fig, ax = plt.subplots(figsize=(10, 8))
     ax.imshow(img)

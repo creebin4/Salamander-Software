@@ -4,96 +4,17 @@ import argparse
 import json
 import math
 import random
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
-import matplotlib.image as mpimg
 import matplotlib.pyplot as plt
 import numpy as np
-import yaml
 
-
-# -----------------------------
-# Data structures
-# -----------------------------
-
-
-@dataclass
-class YoloPoseLabel:
-    class_id: int
-    x_center: float
-    y_center: float
-    width: float
-    height: float
-    # keypoints: list of (x, y, v)
-    keypoints: List[Tuple[float, float, float]]
-
-    @staticmethod
-    def parse(line: str) -> "YoloPoseLabel":
-        parts = [float(x) for x in line.strip().split()]
-        if len(parts) < 5:
-            raise ValueError("Invalid label line; expected at least 5 values")
-        class_id = int(parts[0])
-        x, y, w, h = parts[1:5]
-        remaining = parts[5:]
-        keypoints: List[Tuple[float, float, float]] = []
-        for i in range(0, len(remaining), 3):
-            if i + 2 >= len(remaining):
-                break
-            keypoints.append((remaining[i], remaining[i + 1], remaining[i + 2]))
-        return YoloPoseLabel(class_id, x, y, w, h, keypoints)
-
-    def to_line(self) -> str:
-        parts: List[str] = []
-        # class id as integer
-        parts.append(str(int(self.class_id)))
-        # bbox floats
-        parts.extend([f"{self.x_center:.6f}", f"{self.y_center:.6f}", f"{self.width:.6f}", f"{self.height:.6f}"])
-        # keypoints
-        for (kx, ky, v) in self.keypoints:
-            parts.append(f"{kx:.6f}")
-            parts.append(f"{ky:.6f}")
-            # v is typically 0/1/2, keep as int when possible
-            v_int = int(round(v))
-            parts.append(str(v_int))
-        return " ".join(parts)
-
-
-# -----------------------------
-# Label transforms
-# -----------------------------
-
-
-def hflip_label(label: YoloPoseLabel, img_w: int, img_h: int, flip_idx: Sequence[int] | None) -> YoloPoseLabel:
-    # Horizontal flip normalized coords: x' = 1 - x
-    flipped_kps = [(1.0 - kx, ky, v) for (kx, ky, v) in label.keypoints]
-    if flip_idx is not None and len(flip_idx) == len(flipped_kps):
-        # Reindex according to mapping; new[i] = old[flip_idx[i]]
-        flipped_kps = [flipped_kps[j] for j in flip_idx]
-
-    return YoloPoseLabel(
-        class_id=label.class_id,
-        x_center=1.0 - label.x_center,
-        y_center=label.y_center,
-        width=label.width,
-        height=label.height,
-        keypoints=flipped_kps,
-    )
-
-
-def vflip_label(label: YoloPoseLabel, img_w: int, img_h: int) -> YoloPoseLabel:
-    # Vertical flip normalized coords: y' = 1 - y
-    flipped_kps = [(kx, 1.0 - ky, v) for (kx, ky, v) in label.keypoints]
-    return YoloPoseLabel(
-        class_id=label.class_id,
-        x_center=label.x_center,
-        y_center=1.0 - label.y_center,
-        width=label.width,
-        height=label.height,
-        keypoints=flipped_kps,
-    )
+from yolo_utils import YoloPoseLabel, read_yaml, write_yaml, read_label_file, write_label_file
+from zoom_augmentations import create_zoom_augmentations
 
 
 # -----------------------------
@@ -101,36 +22,41 @@ def vflip_label(label: YoloPoseLabel, img_w: int, img_h: int) -> YoloPoseLabel:
 # -----------------------------
 
 
-def read_yaml(path: Path) -> Dict:
-    if not path.exists():
-        return {}
-    with path.open("r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
-
-
-def write_yaml(path: Path, data: Dict) -> None:
-    with path.open("w", encoding="utf-8") as f:
-        yaml.safe_dump(data, f, sort_keys=False)
-
-
-def read_label_file(path: Path) -> List[YoloPoseLabel]:
-    if not path.exists():
-        return []
-    labels: List[YoloPoseLabel] = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            labels.append(YoloPoseLabel.parse(line))
-    return labels
-
-
-def write_label_file(path: Path, labels: List[YoloPoseLabel]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        for label in labels:
-            f.write(label.to_line() + "\n")
+def reorder_keypoints(labels: List[YoloPoseLabel]) -> List[YoloPoseLabel]:
+    """
+    Reorder keypoints according to the specified mapping:
+    keypoint 3 -> keypoint 0
+    keypoint 4 -> keypoint 1  
+    keypoint 2 -> keypoint 2
+    keypoint 1 -> keypoint 3
+    keypoint 5 -> keypoint 4
+    keypoint 0 -> keypoint 5
+    """
+    reordered_labels = []
+    for label in labels:
+        if len(label.keypoints) >= 6:  # Ensure we have enough keypoints
+            # Reorder keypoints: 3->0, 4->1, 2->2, 1->3, 5->4, 0->5
+            reordered_keypoints = [
+                label.keypoints[3],  # keypoint 3 -> keypoint 0
+                label.keypoints[4],  # keypoint 4 -> keypoint 1
+                label.keypoints[2],  # keypoint 5 -> keypoint 4
+                label.keypoints[0],  # keypoint 1 -> keypoint 3
+                label.keypoints[5],  # keypoint 2 -> keypoint 2
+                label.keypoints[1],  # keypoint 0 -> keypoint 5
+            ]
+            reordered_label = YoloPoseLabel(
+                label.class_id,
+                label.x_center,
+                label.y_center,
+                label.width,
+                label.height,
+                reordered_keypoints
+            )
+            reordered_labels.append(reordered_label)
+        else:
+            # If not enough keypoints, keep original
+            reordered_labels.append(label)
+    return reordered_labels
 
 
 def list_image_paths(image_dir: Path) -> List[Path]:
@@ -147,23 +73,7 @@ def pair_images_with_labels(image_dir: Path, label_dir: Path) -> List[Tuple[Path
     return pairs
 
 
-# -----------------------------
-# Augment image + labels
-# -----------------------------
 
-
-def save_image(path: Path, array: np.ndarray) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # plt.imsave expects RGB in [0,1] or [0,255]; it will handle dtype
-    plt.imsave(str(path), array)
-
-
-def augment_hflip(img: np.ndarray) -> np.ndarray:
-    return np.fliplr(img)
-
-
-def augment_vflip(img: np.ndarray) -> np.ndarray:
-    return np.flipud(img)
 
 
 # -----------------------------
@@ -205,7 +115,12 @@ def create_splits_and_augment(
     val_ratio: float,
     test_ratio: float,
     seed: int,
+    original_images_dir: Path,
+    enable_zoom_augmentations: bool = True,
 ) -> None:
+    print("Starting dataset creation with keypoint reordering...")
+    print("Keypoint mapping: 3->0, 4->1, 2->2, 1->3, 5->4, 0->5")
+    
     src_images = base_data_dir / "train" / "images"
     src_labels = base_data_dir / "train" / "labels"
     if not src_images.exists() or not src_labels.exists():
@@ -237,7 +152,17 @@ def create_splits_and_augment(
         dst_img = out_base_dir / split / "images" / img_path.name
         dst_lbl = out_base_dir / split / "labels" / lbl_path.name
         shutil.copy2(img_path, dst_img)
-        shutil.copy2(lbl_path, dst_lbl)
+        
+        # Read and reorder keypoints in labels
+        labels = read_label_file(lbl_path)
+        original_keypoint_count = sum(len(label.keypoints) for label in labels)
+        reordered_labels = reorder_keypoints(labels)
+        reordered_keypoint_count = sum(len(label.keypoints) for label in reordered_labels)
+        write_label_file(dst_lbl, reordered_labels)
+        
+        # Log keypoint reordering if any labels had keypoints
+        if original_keypoint_count > 0:
+            print(f"  Reordered keypoints for {img_path.name}: {original_keypoint_count} -> {reordered_keypoint_count} keypoints")
 
     for img_path, lbl_path in splits["train"]:
         copy_pair(img_path, lbl_path, "train")
@@ -246,36 +171,61 @@ def create_splits_and_augment(
     for img_path, lbl_path in splits["test"]:
         copy_pair(img_path, lbl_path, "test")
 
-    # for img_path, lbl_path in splits["train"]:
-    #     img = mpimg.imread(str(img_path))
-    #     labels = read_label_file(lbl_path)
-    #     if not labels:
-    #         continue
+    # Create zoom augmentations if enabled
+    zoom_augmentation_count = 0
+    if enable_zoom_augmentations and original_images_dir.exists():
+        print("Creating zoom augmentations from original images...")
 
-    #     stem = img_path.stem
-    #     suffix = img_path.suffix
-    #     img_w = img.shape[1]
-    #     img_h = img.shape[0]
+        # Get training pairs from output directory
+        train_images_dir = out_base_dir / "train" / "images"
+        train_labels_dir = out_base_dir / "train" / "labels"
+        train_pairs = pair_images_with_labels(train_images_dir, train_labels_dir)
+        # Exclude already-augmented images to avoid re-zooming (e.g., *_zoomX.jpg)
+        train_pairs = [
+            (ip, lp) for (ip, lp) in train_pairs
+            if "_zoom" not in ip.stem
+        ]
 
-    #     img_hf = augment_hflip(img)
-    #     out_img_hf = out_base_dir / "train" / "images" / f"{stem}_hflip{suffix}"
-    #     save_image(out_img_hf, img_hf)
-    #     labels_hf = [hflip_label(l, img_w, img_h, flip_idx) for l in labels]
-    #     out_lbl_hf = out_base_dir / "train" / "labels" / f"{stem}_hflip.txt"
-    #     write_label_file(out_lbl_hf, labels_hf)
+        # Create zoom augmentations with a simple progress indicator
+        # Each image gets one zoom with a random factor in [3,4]
+        total = len(train_pairs)
+        done = 0
+        def _progress(msg: str = "") -> None:
+            pct = (done / total * 100.0) if total > 0 else 100.0
+            print(f"\rAugmenting: {done}/{total} ({pct:5.1f}%) {msg}", end="", flush=True)
 
+        zoom_pairs: List[Tuple[Path, Path]] = []
+        for i, (img_path, lbl_path) in enumerate(train_pairs):
+            # For each image, call zoom once per factor using the underlying utility
+            try:
+                # Reuse the internal function on a per-image basis
+                single_pairs = create_zoom_augmentations(
+                    train_pairs=[(img_path, lbl_path)],
+                    out_images_dir=train_images_dir,
+                    out_labels_dir=train_labels_dir,
+                    original_images_dir=original_images_dir,
+                    zoom_factor=2.0 + random.random() * 2.0
+                )
+                zoom_pairs.extend(single_pairs)
+            finally:
+                done += 1
+                _progress(img_path.name)
 
-    #     img_vf = augment_vflip(img)
-    #     out_img_vf = out_base_dir / "train" / "images" / f"{stem}_vflip{suffix}"
-    #     save_image(out_img_vf, img_vf)
-    #     labels_vf = [vflip_label(l, img_w, img_h) for l in labels]
-    #     out_lbl_vf = out_base_dir / "train" / "labels" / f"{stem}_vflip.txt"
-    #     write_label_file(out_lbl_vf, labels_vf)
+        # Finish line
+        print()
+        zoom_augmentation_count = len(zoom_pairs)
+        print(f"Created {zoom_augmentation_count} zoom augmentations")
 
     # Update data.yaml to point to new splits while preserving other keys
     data_cfg["train"] = str(Path("./train/images"))
     data_cfg["val"] = str(Path("./valid/images"))
     data_cfg["test"] = str(Path("./test/images"))
+    
+    # Note: flip_idx may need manual adjustment since keypoints were reordered
+    if flip_idx:
+        print(f"  Note: flip_idx in data.yaml may need manual adjustment due to keypoint reordering")
+        print(f"  Original flip_idx: {flip_idx}")
+    
     # Ensure required fields are present
     if "nc" not in data_cfg:
         data_cfg["nc"] = 1
@@ -285,11 +235,24 @@ def create_splits_and_augment(
     write_yaml(out_base_dir / "data.yaml", data_cfg)
 
     # Summary
+    total_train_images = len(splits["train"]) + zoom_augmentation_count
     print(json.dumps(
         {
-            "counts": {k: len(v) for k, v in splits.items()},
+            "counts": {
+                "train": total_train_images,
+                "val": len(splits["val"]),
+                "test": len(splits["test"])
+            },
+            "original_counts": {k: len(v) for k, v in splits.items()},
+            "zoom_augmentations": zoom_augmentation_count,
             "output": str(out_base_dir.resolve()),
-            "augmentations": {"hflip": True, "vflip": True},
+            "augmentations": {
+                "zoom": enable_zoom_augmentations and zoom_augmentation_count > 0
+            },
+            "keypoint_reordering": {
+                "enabled": True,
+                "mapping": "3->0, 4->1, 2->2, 1->3, 5->4, 0->5"
+            },
         },
         indent=2,
     ))
@@ -297,12 +260,13 @@ def create_splits_and_augment(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Split YOLOv8 pose dataset and augment training split")
-    p.add_argument("--data-dir", type=str, default="data-scaled", help="Base data directory containing train/images and train/labels")
+    p.add_argument("--data-dir", type=str, default="data", help="Base data directory containing train/images and train/labels")
     p.add_argument("--out-dir", type=str, default="new-data", help="Output base directory (will contain train/valid/test)")
     p.add_argument("--train", type=float, default=0.8, help="Train ratio")
     p.add_argument("--val", type=float, default=0.10, help="Validation ratio")
     p.add_argument("--test", type=float, default=0.10, help="Test ratio")
     p.add_argument("--seed", type=int, default=42, help="Random seed for split")
+    p.add_argument("--disable-zoom", action="store_true", help="Disable zoom augmentations from original images (enabled by default)")
     return p
 
 
@@ -310,6 +274,13 @@ def main() -> None:
     args = build_arg_parser().parse_args()
     base = Path(args.data_dir)
     out = Path(args.out_dir)
+
+    # Zoom augmentations are enabled by default, disabled with --disable-zoom-augmentations
+    enable_zoom = not args.disable_zoom
+
+    # Original images directory is fixed as "images"
+    original_images_dir = Path("images") if enable_zoom else None
+
     create_splits_and_augment(
         base_data_dir=base,
         out_base_dir=out,
@@ -317,6 +288,8 @@ def main() -> None:
         val_ratio=args.val,
         test_ratio=args.test,
         seed=args.seed,
+        original_images_dir=original_images_dir,
+        enable_zoom_augmentations=enable_zoom,
     )
 
 

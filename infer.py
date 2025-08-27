@@ -1,12 +1,10 @@
 import argparse
-import math
 import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 import numpy as np
 from ultralytics import YOLO
-from PIL import Image
 
 
 def parse_kp_names(arg: Optional[str]) -> Optional[List[str]]:
@@ -14,6 +12,42 @@ def parse_kp_names(arg: Optional[str]) -> Optional[List[str]]:
         return None
     names = [s.strip() for s in arg.split(",")]
     return [n for n in names if n]
+
+
+def pad_to_square(img: np.ndarray) -> Tuple[np.ndarray, int, int]:
+    """Pad image to square while keeping center, return padded image and padding offsets"""
+    h, w = img.shape[:2]
+    
+    if h == w:
+        return img, 0, 0
+    
+    # Determine the size of the square (largest dimension)
+    size = max(h, w)
+    
+    # Calculate padding needed
+    pad_h = (size - h) // 2
+    pad_w = (size - w) // 2
+    
+    # Handle odd padding
+    pad_top = pad_h
+    pad_bottom = size - h - pad_top
+    pad_left = pad_w  
+    pad_right = size - w - pad_left
+    
+    # Pad the image with white
+    if len(img.shape) == 3:
+        # For RGB images, pad with white (1.0 for float images, 255 for uint8)
+        pad_value = 1.0 if img.max() <= 1.0 else 255
+        padded = np.pad(img, ((pad_top, pad_bottom), (pad_left, pad_right), (0, 0)), mode='constant', constant_values=pad_value)
+    else:
+        # For grayscale images
+        pad_value = 1.0 if img.max() <= 1.0 else 255
+        padded = np.pad(img, ((pad_top, pad_bottom), (pad_left, pad_right)), mode='constant', constant_values=pad_value)
+    
+    return padded, pad_left, pad_top
+
+
+
 
 
 def draw_prediction(
@@ -73,137 +107,94 @@ def draw_prediction(
                 ax.plot([x1, x2], [y1, y2], color="cyan", linewidth=2)
 
 
-def compute_angle_deg_from_kps(
-    kps_xy: np.ndarray,
-    image_center_xy: Optional[Tuple[float, float]],
-    quiet: bool = False,
-) -> float:
-    if kps_xy.shape[0] < 3:
-        return 0.0
-    center = np.array([image_center_xy[0], image_center_xy[1]])
-    left_eye = kps_xy[0]
-    nose = kps_xy[1]
-    right_eye = kps_xy[2]
-    midpoint = (left_eye + right_eye) / 2
-    MC = midpoint - center
-    MN  = midpoint - nose
-    cos_theta = np.dot(MC, MN) / (np.linalg.norm(MC) * np.linalg.norm(MN))
-    theta = np.arccos(cos_theta)
-    target_angle = np.degrees(theta)
-    if not quiet:
-        print(f"Target angle: {target_angle:.1f}°")
 
-    CM = center - midpoint
-    current_angle = 180 - np.degrees(np.arctan2(CM[1], CM[0]))
-    if not quiet:
-        print(f"Current angle: {current_angle:.1f}°")
-    return target_angle - current_angle + 180
 
-def rotate_and_crop(
-    img: np.ndarray,
-    center_xy: Tuple[float, float],
-    width: float,
-    height: float,
-    angle_deg: float,
-) -> Tuple[np.ndarray, np.ndarray, int, int]:
-    # Rotate whole image around center, then crop axis-aligned rectangle
+
+def inference_single_image(
+    image: np.ndarray,
+    model: Optional[YOLO] = None,
+    imgsz: int = 1024,
+    conf: float = 0.25,
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], List[str]]:
+    """
+    Run inference on a single image with hardcoded defaults.
+    
+    Args:
+        image: Input image as numpy array (H, W, 3) in RGB format
+        model: Loaded YOLO model (default: loads train11/last.pt)
+        imgsz: Inference image size (default: 1024)
+        conf: Confidence threshold (default: 0.25)
+        
+    Returns:
+        Tuple of (boxes_xyxy, keypoints_xy, keypoints_conf, classes, class_names_list)
+        - boxes_xyxy: Bounding boxes in original image coordinates [N, 4]
+        - keypoints_xy: Keypoints in original image coordinates [N, K, 2] 
+        - keypoints_conf: Keypoint confidences [N, K]
+        - classes: Class IDs [N]
+        - class_names_list: List of class names
+    """
+    # Load default model if not provided
+    if model is None:
+        default_model_path = Path("runs/pose/train11/weights/last.pt")
+        model = YOLO(str(default_model_path))
+    orig_h, orig_w = image.shape[0], image.shape[1]
+    
+    # Convert to RGB if needed
+    if image.ndim == 2:  # grayscale
+        image = np.stack([image] * 3, axis=-1)
+    elif image.shape[2] == 4:  # RGBA
+        image = image[:, :, :3]  # drop alpha
+    
+    # Pad the image to square for YOLO inference
+    padded_img, pad_x, pad_y = pad_to_square(image)
+    padded_h, padded_w = padded_img.shape[0], padded_img.shape[1]
+    
+    # Save padded image temporarily for YOLO inference
+    import tempfile
+    from PIL import Image as PILImage
+    
+    with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp_file:
+        padded_pil = PILImage.fromarray((padded_img * 255).astype(np.uint8) if padded_img.max() <= 1.0 else padded_img.astype(np.uint8))
+        padded_pil.save(tmp_file.name)
+        tmp_path = tmp_file.name
+    
     try:
-        import cv2  # type: ignore
-    except Exception as e:
-        raise RuntimeError("OpenCV (cv2) is required for rotate_and_crop") from e
-
-    h, w = img.shape[:2]
-    cx, cy = center_xy
-    M = cv2.getRotationMatrix2D((cx, cy), angle_deg, 1.0)
-    rotated = cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
-
-    # Compute crop bounds in rotated image
-    half_w = width / 2.0
-    half_h = height / 2.0
-    x1 = int(round(cx - half_w))
-    y1 = int(round(cy - half_h))
-    x2 = int(round(cx + half_w))
-    y2 = int(round(cy + half_h))
-
-    x1 = max(0, x1)
-    y1 = max(0, y1)
-    x2 = min(w, x2)
-    y2 = min(h, y2)
-    if x2 <= x1 or y2 <= y1:
-        return rotated[0:1, 0:1].copy(), M, x1, y1
-    return rotated[y1:y2, x1:x2].copy(), M, x1, y1
-
-
-def apply_affine_to_point(M: np.ndarray, x: float, y: float) -> Tuple[float, float]:
-    x_new = M[0, 0] * x + M[0, 1] * y + M[0, 2]
-    y_new = M[1, 0] * x + M[1, 1] * y + M[1, 2]
-    return x_new, y_new
-
-
-def run_inference(
-    image_path: Path,
-    model_path: Path,
-    imgsz: int,
-    conf: float,
-    keypoint_names: Optional[List[str]] = None,
-    visual_mode: bool = True,
-    output_path: Optional[Path] = None,
-    quiet: bool = False,
-) -> float:
-    start_time = time.time()
-
-    # Load original high-res image for plotting and cropping
-    if visual_mode:
-        import matplotlib.image as mpimg  # Lazy import to avoid matplotlib when not visual
-        orig_img = mpimg.imread(str(image_path))
-        if orig_img is None:
-            raise RuntimeError(f"Failed to read image: {image_path}")
-    else:
-        try:
-            import cv2  # type: ignore
-        except Exception as e:
-            raise RuntimeError("OpenCV (cv2) is required for non-visual image loading") from e
-        orig_img_bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
-        if orig_img_bgr is None:
-            raise RuntimeError(f"Failed to read image: {image_path}")
-        # Convert to RGB for consistent downstream processing/saving
-        orig_img = cv2.cvtColor(orig_img_bgr, cv2.COLOR_BGR2RGB)
-    orig_h, orig_w = orig_img.shape[0], orig_img.shape[1]
-
-    # Convert to RGB if needed (matplotlib.imread handles most formats)
-    if orig_img.ndim == 2:  # grayscale
-        orig_img = np.stack([orig_img] * 3, axis=-1)
-    elif orig_img.shape[2] == 4:  # RGBA
-        orig_img = orig_img[:, :, :3]  # drop alpha
-
-    model = YOLO(str(model_path))
-    results = model.predict(source=str(image_path), imgsz=imgsz, conf=conf, verbose=False)
+        results = model.predict(source=tmp_path, imgsz=imgsz, conf=conf, verbose=False)
+    finally:
+        # Clean up temporary file
+        Path(tmp_path).unlink(missing_ok=True)
+    
     if not results:
-        raise RuntimeError("No results from model.predict")
-
+        return None, None, None, None, []
+    
     result = results[0]
-    # Get inference dimensions
+    # Get inference dimensions (should be square now)
     inf_h, inf_w = result.orig_img.shape[0], result.orig_img.shape[1]
-
-    # Scale factor from inference to original
-    scale_x = orig_w / inf_w
-    scale_y = orig_h / inf_h
-
+    
+    # Scale factor from inference to padded image
+    scale_x = padded_w / inf_w
+    scale_y = padded_h / inf_h
+    
     boxes_xyxy = result.boxes.xyxy.cpu().numpy() if result.boxes is not None else None
     classes = result.boxes.cls.cpu().numpy().astype(int) if (result.boxes is not None and result.boxes.cls is not None) else None
-
+    
     kp = result.keypoints
     keypoints_xy = kp.xy.cpu().numpy() if kp is not None and kp.xy is not None else None
     keypoints_conf = kp.conf.cpu().numpy() if kp is not None and hasattr(kp, "conf") and kp.conf is not None else None
-
-    # Scale boxes to original resolution
+    
+    # Scale boxes to padded image resolution, then adjust for padding to get original coordinates
     if boxes_xyxy is not None:
         boxes_xyxy = boxes_xyxy * [scale_x, scale_y, scale_x, scale_y]
-
-    # Scale keypoints to original resolution
+        # Subtract padding to get coordinates in original image space
+        boxes_xyxy = boxes_xyxy - [pad_x, pad_y, pad_x, pad_y]
+    
+    # Scale keypoints to padded image resolution, then adjust for padding
     if keypoints_xy is not None:
         keypoints_xy = keypoints_xy * [scale_x, scale_y]
-
+        # Subtract padding to get coordinates in original image space
+        keypoints_xy = keypoints_xy - [pad_x, pad_y]
+    
+    # Get class names
     class_names = result.names if hasattr(result, "names") and isinstance(result.names, dict) else model.names
     if isinstance(class_names, dict):
         # Convert dict {id: name} to list indexed by id
@@ -214,140 +205,138 @@ def run_inference(
         class_names_list = names_list
     else:
         class_names_list = list(class_names)
+    
+    return boxes_xyxy, keypoints_xy, keypoints_conf, classes, class_names_list
+
+
+def run_inference(
+    image_path: Path,
+    model_path: Path,
+    imgsz: int,
+    conf: float,
+    keypoint_names: Optional[List[str]] = None,
+) -> float:
+    start_time = time.time()
+
+    # Load original high-res image for plotting
+    import matplotlib.image as mpimg
+    orig_img = mpimg.imread(str(image_path))
+    if orig_img is None:
+        raise RuntimeError(f"Failed to read image: {image_path}")
+    orig_h, orig_w = orig_img.shape[0], orig_img.shape[1]
+
+    # Load model and run inference using the single method
+    model = YOLO(str(model_path))
+    boxes_xyxy, keypoints_xy, keypoints_conf, classes, class_names_list = inference_single_image(
+        orig_img, model, imgsz, conf
+    )
+    
+    # Get padded image for visualization
+    padded_img, pad_x, pad_y = pad_to_square(orig_img)
+
+    # Always show visualization
+    import matplotlib.pyplot as plt
+
+    # Scale boxes and keypoints for the manually created 1024x1024 image
+    yolo_scaled_boxes = None
+    yolo_scaled_keypoints = None
+    if boxes_xyxy is not None:
+        # Add padding back to get padded coordinates, then scale to imgsz
+        temp_boxes = boxes_xyxy + [pad_x, pad_y, pad_x, pad_y]
+        # Scale from padded image size to imgsz (e.g., 1024x1024)
+        padded_size = padded_img.shape[0]  # Should be square
+        scale_to_imgsz = imgsz / padded_size
+        yolo_scaled_boxes = temp_boxes * scale_to_imgsz
+    if keypoints_xy is not None:
+        # Add padding back to get padded coordinates, then scale to imgsz
+        temp_keypoints = keypoints_xy + [pad_x, pad_y]
+        # Scale from padded image size to imgsz (e.g., 1024x1024)
+        padded_size = padded_img.shape[0]  # Should be square
+        scale_to_imgsz = imgsz / padded_size
+        yolo_scaled_keypoints = temp_keypoints * scale_to_imgsz
+
+
+    
+    # Create the actual scaled-down image that YOLO processes (e.g., 1024x1024)
+    from PIL import Image as PILImage
+    padded_pil = PILImage.fromarray((padded_img * 255).astype(np.uint8) if padded_img.max() <= 1.0 else padded_img.astype(np.uint8))
+    yolo_scaled_pil = padded_pil.resize((imgsz, imgsz), PILImage.Resampling.LANCZOS)
+    yolo_scaled_img = np.array(yolo_scaled_pil)
+
+    # Create figure with four subplots: original, padded full-res, YOLO scaled, original with labels
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(20, 16))
 
     if boxes_xyxy is not None and keypoints_xy is not None and boxes_xyxy.shape[0] > 0:
-        # Prepare cropped image from original high-res
-        x1, y1, x2, y2 = boxes_xyxy[0].tolist()
-        cx = (x1 + x2) / 2.0
-        cy = (y1 + y2) / 2.0
-        bw = (x2 - x1)
-        bh = (y2 - y1)
-        # Use original image center as reference (optional)
-        angle = compute_angle_deg_from_kps(keypoints_xy[0], image_center_xy=(cx, cy), quiet=quiet)
-        crop, M, x_off, y_off = rotate_and_crop(orig_img, (cx, cy), bw, bh, angle)
+        # Top-left: original image without labels
+        ax1.imshow(orig_img)
+        ax1.set_title(f"Original Image ({orig_w}x{orig_h})")
+        ax1.axis("off")
 
-        if visual_mode:
-            import matplotlib.pyplot as plt  # Lazy import
-            import matplotlib.patches as patches  # Lazy import
+        # Top-right: padded square full resolution
+        ax2.imshow(padded_img)
+        ax2.set_title(f"Padded Square - Full Resolution ({padded_img.shape[1]}x{padded_img.shape[0]})")
+        ax2.axis("off")
 
-            # Get the downscaled version from model inference
-            downscaled_img_bgr = result.orig_img
-            downscaled_img = downscaled_img_bgr[:, :, ::-1].copy()  # BGR to RGB
+        # Bottom-left: actual YOLO input (scaled down, e.g., 1024x1024) with predictions
+        ax3.imshow(yolo_scaled_img)
+        ax3.set_title(f"YOLO Input - Scaled ({imgsz}x{imgsz}) with Labels")
+        ax3.axis("off")
+        draw_prediction(
+            ax=ax3,
+            img_h=imgsz,
+            img_w=imgsz,
+            boxes_xyxy=yolo_scaled_boxes,
+            classes=classes,
+            keypoints_xy=yolo_scaled_keypoints,
+            keypoints_conf=keypoints_conf,
+            class_names=class_names_list,
+            keypoint_names=keypoint_names,
+        )
 
-            # Scale boxes and keypoints to downscaled resolution for plotting
-            downscaled_boxes = boxes_xyxy / [scale_x, scale_y, scale_x, scale_y] if boxes_xyxy is not None else None
-            downscaled_keypoints = keypoints_xy / [scale_x, scale_y] if keypoints_xy is not None else None
+        # Bottom-right: original high-res with predictions
+        ax4.imshow(orig_img)
+        ax4.set_title(f"Original with Labels ({orig_w}x{orig_h})")
+        ax4.axis("off")
+        draw_prediction(
+            ax=ax4,
+            img_h=orig_h,
+            img_w=orig_w,
+            boxes_xyxy=boxes_xyxy,
+            classes=classes,
+            keypoints_xy=keypoints_xy,
+            keypoints_conf=keypoints_conf,
+            class_names=class_names_list,
+            keypoint_names=keypoint_names,
+        )
 
-            # Create figure with three subplots (original, downscaled, rotated crop)
-            fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(24, 8))
-
-            # Left: original high-res with predictions
-            ax1.imshow(orig_img)
-            ax1.set_title(f"Original ({orig_w}x{orig_h})")
-            ax1.axis("off")
-            draw_prediction(
-                ax=ax1,
-                img_h=orig_h,
-                img_w=orig_w,
-                boxes_xyxy=boxes_xyxy,
-                classes=classes,
-                keypoints_xy=keypoints_xy,
-                keypoints_conf=keypoints_conf,
-                class_names=class_names_list,
-                keypoint_names=keypoint_names,
-            )
-
-            # Compute midpoint 0-2 and draw guide to point 1 on original and downscaled
-            if keypoints_xy is not None and keypoints_xy.shape[1] >= 3:
-                x0, y0 = keypoints_xy[0][0].tolist()
-                x1k, y1k = keypoints_xy[0][1].tolist()
-                x2, y2 = keypoints_xy[0][2].tolist()
-                mx, my = (x0 + x2) / 2.0, (y0 + y2) / 2.0
-                # Original
-                ax1.scatter([mx], [my], c="orange", s=40, zorder=5)
-                ax1.plot([mx, x1k], [my, y1k], color="orange", linewidth=2, zorder=5)
-
-                # Downscaled
-                if downscaled_keypoints is not None:
-                    x0d, y0d = downscaled_keypoints[0][0].tolist()
-                    x1d, y1d = downscaled_keypoints[0][1].tolist()
-                    x2d, y2d = downscaled_keypoints[0][2].tolist()
-                    mxd, myd = (x0d + x2d) / 2.0, (y0d + y2d) / 2.0
-                    ax2.scatter([mxd], [myd], c="orange", s=40, zorder=5)
-                    ax2.plot([mxd, x1d], [myd, y1d], color="orange", linewidth=2, zorder=5)
-
-            # Middle: downscaled version with predictions
-            ax2.imshow(downscaled_img)
-            ax2.set_title(f"Model Input ({inf_w}x{inf_h})")
-            ax2.axis("off")
-            draw_prediction(
-                ax=ax2,
-                img_h=inf_h,
-                img_w=inf_w,
-                boxes_xyxy=downscaled_boxes,
-                classes=classes,
-                keypoints_xy=downscaled_keypoints,
-                keypoints_conf=keypoints_conf,
-                class_names=class_names_list,
-                keypoint_names=keypoint_names,
-            )
-
-            # Right: cropped rotated high-res image
-            ax3.imshow(crop)
-            ax3.set_title(f"Rotated Crop ({crop.shape[1]}x{crop.shape[0]}) | Vector 0->2 Down | Angle: {angle:.1f}°")
-            ax3.axis("off")
-
-            # Draw midpoint and line on rotated crop (transform by M and offset by crop top-left)
-            if keypoints_xy is not None and keypoints_xy.shape[1] >= 3:
-                x0, y0 = keypoints_xy[0][0].tolist()
-                x1k, y1k = keypoints_xy[0][1].tolist()
-                x2, y2 = keypoints_xy[0][2].tolist()
-                mx, my = (x0 + x2) / 2.0, (y0 + y2) / 2.0
-                rx_m, ry_m = apply_affine_to_point(M, mx, my)
-                rx_1, ry_1 = apply_affine_to_point(M, x1k, y1k)
-                # shift into crop coordinates
-                rx_m -= x_off
-                ry_m -= y_off
-                rx_1 -= x_off
-                ry_1 -= y_off
-                ax3.scatter([rx_m], [ry_m], c="orange", s=40, zorder=5)
-                ax3.plot([rx_m, rx_1], [ry_m, ry_1], color="orange", linewidth=2, zorder=5)
-
-            plt.tight_layout()
-            plt.show()
-            # Close the figure to free memory
-            plt.close(fig)
-        else:
-            # Save the processed crop image without any matplotlib usage
-            if output_path is not None:
-                output_path.mkdir(parents=True, exist_ok=True)
-                output_file = output_path / image_path.name
-                # Convert numpy array (RGB) to PIL Image and save
-                crop_pil = Image.fromarray(crop)
-                crop_pil.save(str(output_file))
-                if not quiet:
-                    print(f"Saved processed image to: {output_file}")
+        plt.tight_layout()
+        plt.show()
+        plt.close(fig)
     else:
-        if visual_mode:
-            import matplotlib.pyplot as plt  # Lazy import
-            # No detections, show original and downscaled
-            downscaled_img_bgr = result.orig_img
-            downscaled_img = downscaled_img_bgr[:, :, ::-1].copy()  # BGR to RGB
-
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
-            ax1.imshow(orig_img)
-            ax1.set_title(f"Original ({orig_w}x{orig_h}) | No detections")
-            ax1.axis("off")
-            ax2.imshow(downscaled_img)
-            ax2.set_title(f"Model Input ({inf_w}x{inf_h}) | No detections")
-            ax2.axis("off")
-            plt.tight_layout()
-            plt.show()
-            # Close the figure to free memory
-            plt.close(fig)
-        else:
-            if not quiet:
-                print(f"No detections found for {image_path.name}, skipping save")
+            # Handle case with no detections
+        # Top-left: original image
+        ax1.imshow(orig_img)
+        ax1.set_title(f"Original Image ({orig_w}x{orig_h}) - No detections")
+        ax1.axis("off")
+        
+        # Top-right: padded square full resolution
+        ax2.imshow(padded_img)
+        ax2.set_title(f"Padded Square - Full Resolution ({padded_img.shape[1]}x{padded_img.shape[0]}) - No detections")
+        ax2.axis("off")
+        
+        # Bottom-left: YOLO input scaled
+        ax3.imshow(yolo_scaled_img)
+        ax3.set_title(f"YOLO Input - Scaled ({imgsz}x{imgsz}) - No detections")
+        ax3.axis("off")
+        
+        # Bottom-right: original (same as top-left since no labels)
+        ax4.imshow(orig_img)
+        ax4.set_title(f"Original with Labels ({orig_w}x{orig_h}) - No detections")
+        ax4.axis("off")
+        
+        plt.tight_layout()
+        plt.show()
+        plt.close(fig)
 
     end_time = time.time()
     processing_time = end_time - start_time
@@ -361,19 +350,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--model",
         type=str,
-        default=str(Path("runs") / "pose" / "train5" / "weights" / "best.pt"),
-        help="Path to trained YOLOv8-pose model",
+        default=str(Path("runs") / "pose" / "train11" / "weights" / "last.pt"),
+        help="Path to trained YOLOv8-pose model (default: runs/pose/train11/weights/last.pt)",
     )
-    p.add_argument("--imgsz", type=int, default=640, help="Inference image size")
-    p.add_argument("--conf", type=float, default=0.25, help="Confidence threshold")
+    p.add_argument("--imgsz", type=int, default=1024, help="Inference image size (default: 1024)")
+    p.add_argument("--conf", type=float, default=0.25, help="Confidence threshold (default: 0.25)")
     p.add_argument(
         "--kp-names",
         type=str,
-        default="left-eye,snout,right-eye",
-        help="Comma-separated keypoint names in order. Leave empty to show indices.",
+        default="left-out,left-eye,left-edge,right-edge,right-eye,right-out",
+        help="Comma-separated keypoint names in order (default: left-out,left-eye,left-edge,right-edge,right-eye,right-out)",
     )
-    p.add_argument("--visual", action="store_true", help="Show visualization instead of saving processed images")
-    p.add_argument("--output", type=str, help="Output folder path for processed images (required when not using --visual)")
     return p
 
 
@@ -404,34 +391,23 @@ def main() -> None:
     if args.image and args.folder:
         raise ValueError("Cannot provide both --image and --folder")
 
-    # Validate visual/output arguments
-    if not args.visual and not args.output:
-        raise ValueError("Must specify --output when not using --visual mode")
-    if args.visual and args.output:
-        raise ValueError("Cannot specify --output when using --visual mode")
-
     # Determine input path
     input_path = Path(args.image or args.folder)
     model_path = Path(args.model)
     kp_names = parse_kp_names(args.kp_names)
-    output_path = Path(args.output) if args.output else None
 
     # Get list of images to process
     image_paths = get_image_paths(input_path)
     if not image_paths:
         raise ValueError(f"No images found at {input_path}")
 
-    print(f"Processing {len(image_paths)} image(s)...")
+    print(f"Processing {len(image_paths)} image(s) in visual mode...")
 
     total_start_time = time.time()
-    quiet_mode = not args.visual
 
     # Process each image
     for i, image_path in enumerate(image_paths):
-        if quiet_mode:
-            print(f"[{i+1}/{len(image_paths)}] Processing: {image_path.name}", end=" ", flush=True)
-        else:
-            print(f"\n[{i+1}/{len(image_paths)}] Processing: {image_path.name}")
+        print(f"\n[{i+1}/{len(image_paths)}] Processing: {image_path.name}")
 
         try:
             processing_time = run_inference(
@@ -440,27 +416,15 @@ def main() -> None:
                 imgsz=args.imgsz,
                 conf=args.conf,
                 keypoint_names=kp_names,
-                visual_mode=args.visual,
-                output_path=output_path,
-                quiet=quiet_mode,
             )
-
-            if quiet_mode:
-                print(f"({processing_time:.1f}s)")
+            print(f"Processing time: {processing_time:.1f}s")
         except Exception as e:
-            if quiet_mode:
-                print(f"ERROR ({e})")
-            else:
-                print(f"Error processing {image_path}: {e}")
+            print(f"Error processing {image_path}: {e}")
             continue
 
     total_end_time = time.time()
     total_time = total_end_time - total_start_time
-
-    if quiet_mode:
-        print(f"Total time: {total_time:.1f}s")
-    else:
-        print(f"\nFinished processing {len(image_paths)} image(s)")
+    print(f"\nFinished processing {len(image_paths)} image(s) in {total_time:.1f}s")
 
 
 if __name__ == "__main__":
