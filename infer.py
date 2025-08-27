@@ -4,9 +4,6 @@ import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-import matplotlib.image as mpimg
-import matplotlib.patches as patches
-import matplotlib.pyplot as plt
 import numpy as np
 from ultralytics import YOLO
 from PIL import Image
@@ -30,6 +27,8 @@ def draw_prediction(
     class_names: List[str],
     keypoint_names: Optional[List[str]] = None,
 ) -> None:
+    # Lazy import to avoid matplotlib dependency in non-visual mode
+    import matplotlib.patches as patches  # type: ignore
     num_instances = 0 if boxes_xyxy is None else boxes_xyxy.shape[0]
     for i in range(num_instances):
         x1, y1, x2, y2 = boxes_xyxy[i].tolist()
@@ -154,9 +153,21 @@ def run_inference(
     start_time = time.time()
 
     # Load original high-res image for plotting and cropping
-    orig_img = mpimg.imread(str(image_path))
-    if orig_img is None:
-        raise RuntimeError(f"Failed to read image: {image_path}")
+    if visual_mode:
+        import matplotlib.image as mpimg  # Lazy import to avoid matplotlib when not visual
+        orig_img = mpimg.imread(str(image_path))
+        if orig_img is None:
+            raise RuntimeError(f"Failed to read image: {image_path}")
+    else:
+        try:
+            import cv2  # type: ignore
+        except Exception as e:
+            raise RuntimeError("OpenCV (cv2) is required for non-visual image loading") from e
+        orig_img_bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+        if orig_img_bgr is None:
+            raise RuntimeError(f"Failed to read image: {image_path}")
+        # Convert to RGB for consistent downstream processing/saving
+        orig_img = cv2.cvtColor(orig_img_bgr, cv2.COLOR_BGR2RGB)
     orig_h, orig_w = orig_img.shape[0], orig_img.shape[1]
 
     # Convert to RGB if needed (matplotlib.imread handles most formats)
@@ -215,107 +226,110 @@ def run_inference(
         angle = compute_angle_deg_from_kps(keypoints_xy[0], image_center_xy=(cx, cy), quiet=quiet)
         crop, M, x_off, y_off = rotate_and_crop(orig_img, (cx, cy), bw, bh, angle)
 
-        # Get the downscaled version from model inference
-        downscaled_img_bgr = result.orig_img
-        downscaled_img = downscaled_img_bgr[:, :, ::-1].copy()  # BGR to RGB
-
-        # Scale boxes and keypoints to downscaled resolution for plotting
-        downscaled_boxes = boxes_xyxy / [scale_x, scale_y, scale_x, scale_y] if boxes_xyxy is not None else None
-        downscaled_keypoints = keypoints_xy / [scale_x, scale_y] if keypoints_xy is not None else None
-
-        # Create figure with three subplots (original, downscaled, rotated crop)
-        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(24, 8))
-
-        # Left: original high-res with predictions
-        ax1.imshow(orig_img)
-        ax1.set_title(f"Original ({orig_w}x{orig_h})")
-        ax1.axis("off")
-        draw_prediction(
-            ax=ax1,
-            img_h=orig_h,
-            img_w=orig_w,
-            boxes_xyxy=boxes_xyxy,
-            classes=classes,
-            keypoints_xy=keypoints_xy,
-            keypoints_conf=keypoints_conf,
-            class_names=class_names_list,
-            keypoint_names=keypoint_names,
-        )
-
-        # Compute midpoint 0-2 and draw guide to point 1 on original and downscaled
-        if keypoints_xy is not None and keypoints_xy.shape[1] >= 3:
-            x0, y0 = keypoints_xy[0][0].tolist()
-            x1k, y1k = keypoints_xy[0][1].tolist()
-            x2, y2 = keypoints_xy[0][2].tolist()
-            mx, my = (x0 + x2) / 2.0, (y0 + y2) / 2.0
-            # Original
-            ax1.scatter([mx], [my], c="orange", s=40, zorder=5)
-            ax1.plot([mx, x1k], [my, y1k], color="orange", linewidth=2, zorder=5)
-
-            # Downscaled
-            if downscaled_keypoints is not None:
-                x0d, y0d = downscaled_keypoints[0][0].tolist()
-                x1d, y1d = downscaled_keypoints[0][1].tolist()
-                x2d, y2d = downscaled_keypoints[0][2].tolist()
-                mxd, myd = (x0d + x2d) / 2.0, (y0d + y2d) / 2.0
-                ax2.scatter([mxd], [myd], c="orange", s=40, zorder=5)
-                ax2.plot([mxd, x1d], [myd, y1d], color="orange", linewidth=2, zorder=5)
-
-        # Middle: downscaled version with predictions
-        ax2.imshow(downscaled_img)
-        ax2.set_title(f"Model Input ({inf_w}x{inf_h})")
-        ax2.axis("off")
-        draw_prediction(
-            ax=ax2,
-            img_h=inf_h,
-            img_w=inf_w,
-            boxes_xyxy=downscaled_boxes,
-            classes=classes,
-            keypoints_xy=downscaled_keypoints,
-            keypoints_conf=keypoints_conf,
-            class_names=class_names_list,
-            keypoint_names=keypoint_names,
-        )
-
-        # Right: cropped rotated high-res image
-        ax3.imshow(crop)
-        ax3.set_title(f"Rotated Crop ({crop.shape[1]}x{crop.shape[0]}) | Vector 0->2 Down | Angle: {angle:.1f}°")
-        ax3.axis("off")
-
-        # Draw midpoint and line on rotated crop (transform by M and offset by crop top-left)
-        if keypoints_xy is not None and keypoints_xy.shape[1] >= 3:
-            x0, y0 = keypoints_xy[0][0].tolist()
-            x1k, y1k = keypoints_xy[0][1].tolist()
-            x2, y2 = keypoints_xy[0][2].tolist()
-            mx, my = (x0 + x2) / 2.0, (y0 + y2) / 2.0
-            rx_m, ry_m = apply_affine_to_point(M, mx, my)
-            rx_1, ry_1 = apply_affine_to_point(M, x1k, y1k)
-            # shift into crop coordinates
-            rx_m -= x_off
-            ry_m -= y_off
-            rx_1 -= x_off
-            ry_1 -= y_off
-            ax3.scatter([rx_m], [ry_m], c="orange", s=40, zorder=5)
-            ax3.plot([rx_m, rx_1], [ry_m, ry_1], color="orange", linewidth=2, zorder=5)
-
         if visual_mode:
+            import matplotlib.pyplot as plt  # Lazy import
+            import matplotlib.patches as patches  # Lazy import
+
+            # Get the downscaled version from model inference
+            downscaled_img_bgr = result.orig_img
+            downscaled_img = downscaled_img_bgr[:, :, ::-1].copy()  # BGR to RGB
+
+            # Scale boxes and keypoints to downscaled resolution for plotting
+            downscaled_boxes = boxes_xyxy / [scale_x, scale_y, scale_x, scale_y] if boxes_xyxy is not None else None
+            downscaled_keypoints = keypoints_xy / [scale_x, scale_y] if keypoints_xy is not None else None
+
+            # Create figure with three subplots (original, downscaled, rotated crop)
+            fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(24, 8))
+
+            # Left: original high-res with predictions
+            ax1.imshow(orig_img)
+            ax1.set_title(f"Original ({orig_w}x{orig_h})")
+            ax1.axis("off")
+            draw_prediction(
+                ax=ax1,
+                img_h=orig_h,
+                img_w=orig_w,
+                boxes_xyxy=boxes_xyxy,
+                classes=classes,
+                keypoints_xy=keypoints_xy,
+                keypoints_conf=keypoints_conf,
+                class_names=class_names_list,
+                keypoint_names=keypoint_names,
+            )
+
+            # Compute midpoint 0-2 and draw guide to point 1 on original and downscaled
+            if keypoints_xy is not None and keypoints_xy.shape[1] >= 3:
+                x0, y0 = keypoints_xy[0][0].tolist()
+                x1k, y1k = keypoints_xy[0][1].tolist()
+                x2, y2 = keypoints_xy[0][2].tolist()
+                mx, my = (x0 + x2) / 2.0, (y0 + y2) / 2.0
+                # Original
+                ax1.scatter([mx], [my], c="orange", s=40, zorder=5)
+                ax1.plot([mx, x1k], [my, y1k], color="orange", linewidth=2, zorder=5)
+
+                # Downscaled
+                if downscaled_keypoints is not None:
+                    x0d, y0d = downscaled_keypoints[0][0].tolist()
+                    x1d, y1d = downscaled_keypoints[0][1].tolist()
+                    x2d, y2d = downscaled_keypoints[0][2].tolist()
+                    mxd, myd = (x0d + x2d) / 2.0, (y0d + y2d) / 2.0
+                    ax2.scatter([mxd], [myd], c="orange", s=40, zorder=5)
+                    ax2.plot([mxd, x1d], [myd, y1d], color="orange", linewidth=2, zorder=5)
+
+            # Middle: downscaled version with predictions
+            ax2.imshow(downscaled_img)
+            ax2.set_title(f"Model Input ({inf_w}x{inf_h})")
+            ax2.axis("off")
+            draw_prediction(
+                ax=ax2,
+                img_h=inf_h,
+                img_w=inf_w,
+                boxes_xyxy=downscaled_boxes,
+                classes=classes,
+                keypoints_xy=downscaled_keypoints,
+                keypoints_conf=keypoints_conf,
+                class_names=class_names_list,
+                keypoint_names=keypoint_names,
+            )
+
+            # Right: cropped rotated high-res image
+            ax3.imshow(crop)
+            ax3.set_title(f"Rotated Crop ({crop.shape[1]}x{crop.shape[0]}) | Vector 0->2 Down | Angle: {angle:.1f}°")
+            ax3.axis("off")
+
+            # Draw midpoint and line on rotated crop (transform by M and offset by crop top-left)
+            if keypoints_xy is not None and keypoints_xy.shape[1] >= 3:
+                x0, y0 = keypoints_xy[0][0].tolist()
+                x1k, y1k = keypoints_xy[0][1].tolist()
+                x2, y2 = keypoints_xy[0][2].tolist()
+                mx, my = (x0 + x2) / 2.0, (y0 + y2) / 2.0
+                rx_m, ry_m = apply_affine_to_point(M, mx, my)
+                rx_1, ry_1 = apply_affine_to_point(M, x1k, y1k)
+                # shift into crop coordinates
+                rx_m -= x_off
+                ry_m -= y_off
+                rx_1 -= x_off
+                ry_1 -= y_off
+                ax3.scatter([rx_m], [ry_m], c="orange", s=40, zorder=5)
+                ax3.plot([rx_m, rx_1], [ry_m, ry_1], color="orange", linewidth=2, zorder=5)
+
             plt.tight_layout()
             plt.show()
+            # Close the figure to free memory
+            plt.close(fig)
         else:
-            # Save the processed crop image
+            # Save the processed crop image without any matplotlib usage
             if output_path is not None:
                 output_path.mkdir(parents=True, exist_ok=True)
                 output_file = output_path / image_path.name
-                # Convert numpy array to PIL Image and save
+                # Convert numpy array (RGB) to PIL Image and save
                 crop_pil = Image.fromarray(crop)
                 crop_pil.save(str(output_file))
                 if not quiet:
                     print(f"Saved processed image to: {output_file}")
-
-        # Close the figure to free memory
-        plt.close(fig)
     else:
         if visual_mode:
+            import matplotlib.pyplot as plt  # Lazy import
             # No detections, show original and downscaled
             downscaled_img_bgr = result.orig_img
             downscaled_img = downscaled_img_bgr[:, :, ::-1].copy()  # BGR to RGB
