@@ -1,0 +1,6 @@
+# Exclude everything; repo is cloned during build
+**
+
+# Keep only these in the build context
+!Dockerfile
+!.dockerignore
