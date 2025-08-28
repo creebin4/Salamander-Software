@@ -14,6 +14,7 @@ from sklearn.linear_model import LinearRegression
 import cv2
 from PIL import Image as PILImage
 import os
+import re
 
 # Import the inference function from infer.py
 from infer import inference_single_image, draw_prediction
@@ -295,7 +296,9 @@ def rotate_and_crop_aligned(
     # Rotate the entire image around the rotation center
     h, w = image.shape[:2]
     rotation_matrix = cv2.getRotationMatrix2D(rotation_center, rotation_angle_deg, 1.0)
-    rotated_image = cv2.warpAffine(image, rotation_matrix, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+    # Use white padding instead of reflection when rotating extends beyond image bounds
+    rotated_image = cv2.warpAffine(image, rotation_matrix, (w, h), flags=cv2.INTER_LINEAR, 
+                                  borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255))
     
     # Transform bounding box coordinates to rotated space
     bbox_corners = np.array([
@@ -320,22 +323,42 @@ def rotate_and_crop_aligned(
     rot_bbox_center_y = (rot_y_min + rot_y_max) / 2.0
     
     half_crop = crop_size / 2.0
-    crop_x1 = int(max(0, rot_bbox_center_x - half_crop))
-    crop_y1 = int(max(0, rot_bbox_center_y - half_crop))
-    crop_x2 = int(min(w, rot_bbox_center_x + half_crop))
-    crop_y2 = int(min(h, rot_bbox_center_y + half_crop))
+    crop_x1 = int(rot_bbox_center_x - half_crop)
+    crop_y1 = int(rot_bbox_center_y - half_crop)
+    crop_x2 = int(rot_bbox_center_x + half_crop)
+    crop_y2 = int(rot_bbox_center_y + half_crop)
     
-    # Ensure we get a square crop (adjust if we hit image boundaries)
-    actual_width = crop_x2 - crop_x1
-    actual_height = crop_y2 - crop_y1
-    actual_size = min(actual_width, actual_height)
+    # Calculate the desired crop size
+    desired_crop_size = int(crop_size)
     
-    # Re-center the crop to ensure it's square
-    crop_x2 = crop_x1 + actual_size
-    crop_y2 = crop_y1 + actual_size
+    # Create a white canvas for the final crop
+    cropped_rotated = np.full((desired_crop_size, desired_crop_size, 3), 255, dtype=np.uint8)
     
-    # Extract the square crop
-    cropped_rotated = rotated_image[crop_y1:crop_y2, crop_x1:crop_x2]
+    # Calculate the region to copy from the rotated image
+    src_x1 = max(0, crop_x1)
+    src_y1 = max(0, crop_y1)
+    src_x2 = min(w, crop_x2)
+    src_y2 = min(h, crop_y2)
+    
+    # Calculate the corresponding region in the destination crop
+    dst_x1 = max(0, -crop_x1)
+    dst_y1 = max(0, -crop_y1)
+    dst_x2 = dst_x1 + (src_x2 - src_x1)
+    dst_y2 = dst_y1 + (src_y2 - src_y1)
+    
+    # Ensure destination doesn't exceed the crop canvas bounds
+    dst_x2 = min(dst_x2, desired_crop_size)
+    dst_y2 = min(dst_y2, desired_crop_size)
+    
+    # Recalculate source region to match destination dimensions exactly
+    actual_width = dst_x2 - dst_x1
+    actual_height = dst_y2 - dst_y1
+    src_x2 = src_x1 + actual_width
+    src_y2 = src_y1 + actual_height
+    
+    # Copy the valid region from rotated image to the white canvas
+    if actual_width > 0 and actual_height > 0:
+        cropped_rotated[dst_y1:dst_y2, dst_x1:dst_x2] = rotated_image[src_y1:src_y2, src_x1:src_x2]
     
     return cropped_rotated, rotation_angle_deg, rotation_center
 
@@ -541,24 +564,52 @@ def process_and_crop_image(image_path: Path, visual: bool = False, output_path: 
         return None
 
 
+def extract_unique_identifier(filename: str) -> str:
+    """
+    Extract unique identifier from filename in format YYYYMMDD_Z000000.ext
+    
+    Args:
+        filename: Filename to extract identifier from
+        
+    Returns:
+        Unique identifier (YYYYMMDD_Z000000) or original filename if pattern not found
+    """
+    # Pattern matches YYYYMMDD_Z followed by 6 digits (consistent with zoom_augmentations.py)
+    pattern = r'(\d{8}_Z\d{6})'
+    match = re.search(pattern, filename)
+    return match.group(1) if match else filename
+
+
 def get_image_files(folder_path: Path) -> list[Path]:
     """
-    Get all image files from a folder
+    Get all image files from a folder, removing duplicates based on unique identifier
     
     Args:
         folder_path: Path to folder containing images
         
     Returns:
-        List of image file paths
+        List of unique image file paths (duplicates removed based on YYYYMMDD_Z000000 pattern)
     """
     supported_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff'}
-    image_files = []
+    all_image_files = []
     
     for ext in supported_extensions:
-        image_files.extend(folder_path.glob(f'*{ext}'))
-        image_files.extend(folder_path.glob(f'*{ext.upper()}'))
+        all_image_files.extend(folder_path.glob(f'*{ext}'))
+        all_image_files.extend(folder_path.glob(f'*{ext.upper()}'))
     
-    return sorted(image_files)
+    # Remove duplicates based on unique identifier
+    seen_identifiers = set()
+    unique_files = []
+    
+    for image_path in sorted(all_image_files):
+        identifier = extract_unique_identifier(image_path.name)
+        if identifier not in seen_identifiers:
+            seen_identifiers.add(identifier)
+            unique_files.append(image_path)
+        else:
+            print(f"  Skipping duplicate: {image_path.name} (identifier: {identifier})")
+    
+    return unique_files
 
 
 def process_folder(folder_path: Path, output_folder: Path, visual: bool = False) -> None:
@@ -589,7 +640,7 @@ def process_folder(folder_path: Path, output_folder: Path, visual: bool = False)
         print(f"\n[{i+1}/{len(image_files)}] Processing: {image_path.name}")
         
         # Generate output filename
-        output_filename = f"aligned_crop_{image_path.stem}.jpg"
+        output_filename = f"aligned_crop_{image_path.stem}.tif"
         output_path = output_folder / output_filename
         
         try:
@@ -665,7 +716,7 @@ def main():
         # For single image, save to output folder if specified
         if args.output != "./output" or args.folder:  # Save if custom output or processing folder
             output_folder.mkdir(parents=True, exist_ok=True)
-            output_filename = f"aligned_crop_{image_path.stem}.jpg"
+            output_filename = f"aligned_crop_{image_path.stem}.tif"
             output_path = output_folder / output_filename
         else:
             output_path = None

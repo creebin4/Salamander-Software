@@ -20,6 +20,7 @@ ENV/
 *.bmp
 *.tiff
 *.ico
+*.tif
 
 ./bree
 ./data-scaled
