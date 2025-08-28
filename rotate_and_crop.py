@@ -363,15 +363,16 @@ def rotate_and_crop_aligned(
     return cropped_rotated, rotation_angle_deg, rotation_center
 
 
-def process_and_crop_image(image_path: Path, visual: bool = False, output_path: Path = None) -> np.ndarray:
+def process_and_crop_image(image_path: Path, visual: bool = False, output_path: Path = None, model_path: str = None) -> np.ndarray:
     """
     Process a single image and return cropped bounding box
-    
+
     Args:
         image_path: Path to input image
         visual: Whether to show visualization plots
         output_path: Path to save the cropped image (optional)
-        
+        model_path: Path to trained YOLOv8-pose model (optional)
+
     Returns:
         Cropped image as numpy array, or None if no detection
     """
@@ -386,10 +387,15 @@ def process_and_crop_image(image_path: Path, visual: bool = False, output_path: 
     if visual:
         print(f"Image size: {orig_w}x{orig_h}")
     
-    # Run inference with hardcoded defaults
+    # Run inference with model
     if visual:
         print("Running inference...")
-    boxes, keypoints, keypoints_conf, classes, class_names = inference_single_image(image)
+    # Load model if provided
+    model = None
+    if model_path is not None:
+        from ultralytics import YOLO
+        model = YOLO(model_path)
+    boxes, keypoints, keypoints_conf, classes, class_names = inference_single_image(image, model)
     
     # Hardcoded keypoint names
     keypoint_names = ["left-out", "left-eye", "left-edge", "right-edge", "right-eye", "right-out"]
@@ -612,14 +618,15 @@ def get_image_files(folder_path: Path) -> list[Path]:
     return unique_files
 
 
-def process_folder(folder_path: Path, output_folder: Path, visual: bool = False) -> None:
+def process_folder(folder_path: Path, output_folder: Path, visual: bool = False, model_path: str = None) -> None:
     """
     Process all images in a folder and save outputs
-    
+
     Args:
         folder_path: Path to input folder
         output_folder: Path to output folder
         visual: Whether to show visualization plots
+        model_path: Path to trained YOLOv8-pose model (optional)
     """
     # Create output folder if it doesn't exist
     output_folder.mkdir(parents=True, exist_ok=True)
@@ -647,7 +654,8 @@ def process_folder(folder_path: Path, output_folder: Path, visual: bool = False)
             cropped_image = process_and_crop_image(
                 image_path=image_path,
                 visual=visual,
-                output_path=output_path
+                output_path=output_path,
+                model_path=model_path
             )
             
             if cropped_image is not None:
@@ -672,7 +680,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Process single image or folder: run inference and return cropped bounding boxes"
     )
-    
+
     # Create mutually exclusive group for image vs folder
     input_group = parser.add_mutually_exclusive_group(required=True)
     input_group.add_argument(
@@ -685,7 +693,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=str,
         help="Path to folder containing images"
     )
-    
+
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Path to trained YOLOv8-pose model (default: runs/pose/train11/weights/last.pt)"
+    )
     parser.add_argument(
         "--output",
         type=str,
@@ -724,7 +738,8 @@ def main():
         cropped_image = process_and_crop_image(
             image_path=image_path,
             visual=args.visual,
-            output_path=output_path
+            output_path=output_path,
+            model_path=args.model
         )
         
         if cropped_image is not None:
@@ -748,7 +763,8 @@ def main():
         process_folder(
             folder_path=folder_path,
             output_folder=output_folder,
-            visual=args.visual
+            visual=args.visual,
+            model_path=args.model
         )
 
 
