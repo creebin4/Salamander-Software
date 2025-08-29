@@ -81,8 +81,7 @@ def main() -> None:
     input_group.add_argument("--image", type=str, help="Path to input image")
     input_group.add_argument("--folder", type=str, help="Path to folder of images")
 
-    parser.add_argument("--model", type=str, help="Path to custom model file (will be used for both pose and segmentation if applicable)")
-    parser.add_argument("--pose-model", type=str, default=str(Path("runs") / "pose" / "train11" / "weights" / "last.pt"), help="Path to YOLOv8 pose model")
+    parser.add_argument("--pose-model", type=str, default="last.pt", help="Path to YOLOv8 pose model")
     parser.add_argument("--pose-imgsz", type=int, default=1024, help="Pose inference image size (kept for compatibility)")
     parser.add_argument("--pose-conf", type=float, default=0.25, help="Pose confidence threshold (kept for compatibility)")
 
@@ -95,20 +94,8 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Override pose and segmentation models if --model is specified
-    if args.model:
-        if args.model.endswith(('.pt', '.pth', '.onnx')):
-            pose_model_path = args.model
-            primary_seg_model = args.model
-        else:
-            pose_model_path = args.pose_model
-            primary_seg_model = args.model
-    else:
-        pose_model_path = args.pose_model
-        primary_seg_model = args.seg_model if args.seg_model is not None else "yolov8s-seg.pt"
-
     # Build segmentation model search order (same as segmentation_crop)
-    primary = primary_seg_model
+    primary = args.seg_model if args.seg_model is not None else "yolov8s-seg.pt"
     fallbacks: List[str] = [
         "yolov8x-seg.pt",
         "yolov9c-seg.pt",
@@ -144,7 +131,7 @@ def main() -> None:
             out_path = process_single_image(
                 image_path=img_path,
                 output_dir=output_dir,
-                pose_model_path=pose_model_path,
+                pose_model_path=args.pose_model,
                 seg_models=seg_models,
                 pose_imgsz=args.pose_imgsz,
                 pose_conf=args.pose_conf,

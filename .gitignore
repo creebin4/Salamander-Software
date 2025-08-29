@@ -62,7 +62,7 @@ outputs/
 checkpoints/
 
 # Model weights and large binaries
-*.pt
+*yolo*
 *.onnx
 *.engine
 *.trt
