@@ -1,0 +1,12 @@
+version: "3.9"
+services:
+  yolo:
+    image: my-yolo-ibeis-gpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: uv run python main.py
