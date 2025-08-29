@@ -1,7 +1,7 @@
-version: "3.9"
 services:
   yolo:
-    image: my-yolo-ibeis-gpu
+    build: .
+    image: yolo-ibeis-gpu
     deploy:
       resources:
         reservations:
@@ -9,4 +9,21 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    command: uv run python main.py
+    environment:
+      - INPUT_FOLDER
+      - OUTPUT_FOLDER
+    volumes:
+      - ${INPUT_FOLDER:-./input}:/app/input
+      - ${OUTPUT_FOLDER:-./output}:/app/output
+    command: >
+      sh -c "
+        if [ -n \"$INPUT_FOLDER\" ] && [ -n \"$OUTPUT_FOLDER\" ]; then
+          echo \"Processing images from: /app/input\"
+          echo \"Output will be saved to: /app/output\"
+          uv run python ./pipeline_pose_then_seg.py --folder /app/input --output /app/output
+        else
+          echo 'Please set INPUT_FOLDER and OUTPUT_FOLDER environment variables'
+          echo 'Example: INPUT_FOLDER=/path/to/images OUTPUT_FOLDER=/path/to/output docker-compose up'
+          exit 1
+        fi
+      "
