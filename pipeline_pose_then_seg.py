@@ -1,4 +1,5 @@
 import argparse
+import time
 from pathlib import Path
 from typing import List, Optional
 
@@ -124,8 +125,12 @@ def main() -> None:
     print(f"Found {len(images)} image(s) to process")
     success_count = 0
     fail_count = 0
+    failed_images = []
+    total_start_time = time.time()
+    image_times = []
 
     for i, img_path in enumerate(images):
+        image_start_time = time.time()
         print(f"[{i+1}/{len(images)}] {img_path.name}")
         try:
             out_path = process_single_image(
@@ -141,14 +146,31 @@ def main() -> None:
             )
             if out_path is not None:
                 success_count += 1
-                print(f"  ✓ Saved: {out_path}")
+                print(f"  ✓ Saved: {out_path.name}")
             else:
                 fail_count += 1
+                failed_images.append(img_path.name)
+                print("  ✗ Failed processing")
         except Exception as e:
             fail_count += 1
+            failed_images.append(img_path.name)
             print(f"  ✗ Error: {e}")
 
+        image_time = time.time() - image_start_time
+        image_times.append(image_time)
+        print(f" {image_time:.2f}s")
+
+    total_time = time.time() - total_start_time
+    avg_time_per_image = total_time / len(images) if images else 0
+
     print(f"\nDone. Successful: {success_count}, Failed: {fail_count}. Output: {output_dir}")
+    print(f"Total time: {total_time:.2f}s")
+    print(f"Average time per image: {avg_time_per_image:.2f}s")
+
+    if failed_images:
+        print(f"\nFailed images ({len(failed_images)}):")
+        for img_name in failed_images:
+            print(f"  - {img_name}")
 
 
 if __name__ == "__main__":

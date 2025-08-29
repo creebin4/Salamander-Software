@@ -76,17 +76,36 @@ exit /b 0
 REM --- Check for saved project directory ---
 if exist "%CONFIG_FILE%" (
     REM Read project directory from config file
-    for /f "tokens=*" %%a in (%CONFIG_FILE%) do set PROJECT_DIR=%%a
-    echo Using saved project directory: %PROJECT_DIR%
+    for /f "usebackq tokens=*" %%a in ("%CONFIG_FILE%") do set PROJECT_DIR=%%a
+    REM Trim trailing spaces from PROJECT_DIR
+    if defined PROJECT_DIR (
+        REM Remove trailing spaces by finding the last non-space character
+        setlocal enabledelayedexpansion
+        for /l %%i in (1,1,1000) do if "!PROJECT_DIR:~-1!"==" " (
+            set PROJECT_DIR=!PROJECT_DIR:~0,-1!
+        ) else goto trim_done
+        :trim_done
+        endlocal & set PROJECT_DIR=%PROJECT_DIR%
+    )
+    REM Verify the project directory exists
+    dir "%PROJECT_DIR%" >nul 2>&1
+    if %errorlevel% equ 0 (
+        goto main_interface
+    ) else (
+        echo Warning: Saved project directory no longer exists.
+        echo Deleting config file - please re-enter project directory.
+        del "%CONFIG_FILE%" 2>nul
+        goto main
+    )
 ) else (
     REM Ask for project directory on first run
     echo Salamander Software - First Time Setup
+    set /p PROJECT_DIR="Project directory: "
     echo ======================================
     echo.
     echo Please enter the full path to your project directory
     echo (where the Salamander-Software code is located)
     echo.
-    set /p PROJECT_DIR="Project directory: "
 
     REM Validate project directory
     if not exist "%PROJECT_DIR%" (
@@ -95,34 +114,37 @@ if exist "%CONFIG_FILE%" (
         exit /b 1
     )
 
-    REM Save to config file
-    echo %PROJECT_DIR% > "%CONFIG_FILE%"
+    REM Save to config file (ensure no trailing spaces)
+    setlocal enabledelayedexpansion
+    set "CLEAN_PROJECT_DIR=%PROJECT_DIR%"
+    REM Remove any trailing spaces
+    :clean_loop
+    if "!CLEAN_PROJECT_DIR:~-1!"==" " (
+        set "CLEAN_PROJECT_DIR=!CLEAN_PROJECT_DIR:~0,-1!"
+        goto clean_loop
+    )
+    endlocal & set CLEAN_PROJECT_DIR=%CLEAN_PROJECT_DIR%
+    echo %CLEAN_PROJECT_DIR% > "%CONFIG_FILE%"
+
     echo.
     echo Project directory saved to: %CONFIG_FILE%
     echo You won't need to enter it again on future runs.
     echo.
+    REM Clear the screen after setup
+    cls
 )
 
+:main_interface
 REM --- Clean up any existing container ---
 docker rm -f %CONTAINER_NAME% 2>nul
 
 REM --- Ask for input and output folders ---
 echo Salamander Software - Image Processing Pipeline
 echo ================================================
-echo Project Directory: %PROJECT_DIR%
+echo Using saved project directory: %PROJECT_DIR%
 echo.
 set /p INPUT_FOLDER="Enter the full path to your input folder (containing images): "
 set /p OUTPUT_FOLDER="Enter the full path to your output folder: "
-
-REM --- Optional: Reset project directory ---
-echo.
-set /p RESET_PROJECT="Change project directory? (y/N): "
-if /i "%RESET_PROJECT%"=="y" (
-    del "%CONFIG_FILE%" 2>nul
-    echo Config file deleted. Please restart the script to set a new project directory.
-    pause
-    exit /b 0
-)
 
 REM --- Validate folders exist ---
 if not exist "%INPUT_FOLDER%" (
