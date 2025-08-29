@@ -48,8 +48,6 @@ def pad_to_square(img: np.ndarray) -> Tuple[np.ndarray, int, int]:
 
 
 
-
-
 def draw_prediction(
     ax,
     img_h: int,
@@ -105,8 +103,6 @@ def draw_prediction(
                 if (v1 is None or v2 is None) or (v1 <= 0 or v2 <= 0):
                     continue
                 ax.plot([x1, x2], [y1, y2], color="cyan", linewidth=2)
-
-
 
 
 
